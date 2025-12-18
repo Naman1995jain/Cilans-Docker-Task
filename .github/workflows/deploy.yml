@@ -1,0 +1,236 @@
+name: Build and Deploy Flask Application
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: Build and Test
+    runs-on: self-hosted
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        shell: powershell
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov flake8
+      
+      - name: Lint with flake8
+        shell: powershell
+        run: |
+          # Stop the build if there are Python syntax errors or undefined names
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          # Exit-zero treats all errors as warnings
+          flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+        continue-on-error: true
+      
+      - name: Build Docker images
+        shell: powershell
+        run: |
+          docker-compose build
+      
+      - name: Start services
+        shell: powershell
+        run: |
+          docker-compose up -d
+          Write-Host "Waiting for services to be ready..."
+          Start-Sleep -Seconds 30
+      
+      - name: Check service health
+        shell: powershell
+        run: |
+          docker-compose ps
+          docker-compose logs
+      
+      - name: Test API endpoints
+        shell: powershell
+        run: |
+          # Wait for Flask app to be ready
+          $maxAttempts = 30
+          $attempt = 0
+          while ($attempt -lt $maxAttempts) {
+            try {
+              $response = Invoke-WebRequest -Uri "http://localhost:5000/health" -UseBasicParsing -ErrorAction Stop
+              Write-Host "Flask app is ready!"
+              break
+            } catch {
+              $attempt++
+              Start-Sleep -Seconds 2
+            }
+          }
+          
+          # Test health endpoint
+          Invoke-WebRequest -Uri "http://localhost:5000/health" -UseBasicParsing
+          
+          # Test database connectivity
+          Invoke-WebRequest -Uri "http://localhost:5000/db-check" -UseBasicParsing
+          
+          # Test users endpoint
+          Invoke-WebRequest -Uri "http://localhost:5000/api/users" -UseBasicParsing
+          
+          # Test products endpoint
+          Invoke-WebRequest -Uri "http://localhost:5000/api/products" -UseBasicParsing
+          
+          # Test frontend
+          Invoke-WebRequest -Uri "http://localhost" -UseBasicParsing
+      
+      - name: Stop services
+        if: always()
+        shell: powershell
+        run: |
+          docker-compose down -v
+
+  deploy:
+    name: Deploy Application
+    needs: build-and-test
+    runs-on: self-hosted
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Create environment file
+        shell: powershell
+        run: |
+          @"
+          # Flask configuration
+          FLASK_APP=run.py
+          FLASK_ENV=production
+          SECRET_KEY=${{ secrets.SECRET_KEY }}
+
+          # Database configuration
+          DB_USER=${{ secrets.DB_USER }}
+          DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+          DB_HOST=postgres
+          DB_PORT=5432
+          DB_NAME=flaskdb
+
+          # Database URLs
+          DATABASE_URL=postgresql://${{ secrets.DB_USER }}:${{ secrets.DB_PASSWORD }}@postgres:5432/flaskdb
+          TEST_DATABASE_URL=postgresql://${{ secrets.DB_USER }}:${{ secrets.DB_PASSWORD }}@postgres:5432/testdb
+
+          # Application configuration
+          PORT=5000
+          "@ | Out-File -FilePath .env -Encoding UTF8
+      
+      - name: Stop existing containers
+        shell: powershell
+        run: |
+          docker-compose down
+        continue-on-error: true
+      
+      - name: Remove old images
+        shell: powershell
+        run: |
+          docker-compose down --rmi all
+        continue-on-error: true
+      
+      - name: Build and start containers
+        shell: powershell
+        run: |
+          docker-compose up -d --build
+      
+      - name: Wait for services
+        shell: powershell
+        run: |
+          Write-Host "Waiting for services to start..."
+          Start-Sleep -Seconds 40
+      
+      - name: Check container status
+        shell: powershell
+        run: |
+          docker-compose ps
+      
+      - name: Verify deployment
+        shell: powershell
+        run: |
+          # Check if containers are running
+          $containers = docker-compose ps --format json | ConvertFrom-Json
+          $runningCount = ($containers | Where-Object { $_.State -eq "running" }).Count
+          
+          if ($runningCount -lt 3) {
+            Write-Host "Error: Not all containers are running"
+            docker-compose logs
+            exit 1
+          }
+          
+          # Test health endpoint
+          try {
+            $response = Invoke-WebRequest -Uri "http://localhost:5000/health" -UseBasicParsing -ErrorAction Stop
+            Write-Host "Health check passed!"
+          } catch {
+            Write-Host "Error: Health check failed"
+            docker-compose logs flask-app
+            exit 1
+          }
+          
+          # Test database connectivity
+          try {
+            $response = Invoke-WebRequest -Uri "http://localhost:5000/db-check" -UseBasicParsing -ErrorAction Stop
+            Write-Host "Database check passed!"
+          } catch {
+            Write-Host "Error: Database check failed"
+            docker-compose logs
+            exit 1
+          }
+          
+          # Test frontend
+          try {
+            $response = Invoke-WebRequest -Uri "http://localhost" -UseBasicParsing -ErrorAction Stop
+            Write-Host "Frontend check passed!"
+          } catch {
+            Write-Host "Error: Frontend check failed"
+            docker-compose logs frontend
+            exit 1
+          }
+          
+          Write-Host "Deployment successful!"
+      
+      - name: Display application URLs
+        shell: powershell
+        run: |
+          Write-Host "========================================" -ForegroundColor Green
+          Write-Host "Deployment Completed Successfully!" -ForegroundColor Green
+          Write-Host "========================================" -ForegroundColor Green
+          Write-Host ""
+          Write-Host "Application URLs:" -ForegroundColor Cyan
+          Write-Host "  Frontend:  http://localhost" -ForegroundColor Yellow
+          Write-Host "  Backend:   http://localhost:5000" -ForegroundColor Yellow
+          Write-Host "  Health:    http://localhost:5000/health" -ForegroundColor Yellow
+          Write-Host ""
+          Write-Host "Container Status:" -ForegroundColor Cyan
+          docker-compose ps
+
+  cleanup:
+    name: Cleanup old images
+    needs: deploy
+    runs-on: self-hosted
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    
+    steps:
+      - name: Clean up Docker resources
+        shell: powershell
+        run: |
+          Write-Host "Cleaning up Docker resources..." -ForegroundColor Cyan
+          
+          # Remove unused Docker images
+          docker image prune -af --filter "until=24h"
+          
+          # Remove unused networks
+          docker network prune -f
+          
+          Write-Host "Cleanup completed!" -ForegroundColor Green
