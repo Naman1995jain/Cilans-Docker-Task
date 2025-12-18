@@ -1,4 +1,4 @@
-name: Build and Deploy Flask Application
+name: Build and Deploy
 
 on:
   push:
@@ -6,37 +6,17 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-test-deploy:
-    name: Build, Test and Deploy
+  deploy:
+    name: Build and Deploy
     runs-on: self-hosted
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
       
-      - name: Display environment info
+      - name: Create .env file
         shell: powershell
         run: |
-          Write-Host "=== Environment Information ===" -ForegroundColor Cyan
-          Write-Host "Working Directory: $PWD"
-          Write-Host "Docker Version:" 
-          docker --version
-          Write-Host "Docker Compose Version:"
-          docker-compose --version
-          Write-Host "Python Version:"
-          python --version
-      
-      - name: Stop any existing containers
-        shell: powershell
-        run: |
-          Write-Host "Stopping existing containers..." -ForegroundColor Yellow
-          docker-compose down -v
-        continue-on-error: true
-      
-      - name: Create environment file
-        shell: powershell
-        run: |
-          Write-Host "Creating .env file..." -ForegroundColor Yellow
           @"
           FLASK_APP=run.py
           FLASK_ENV=production
@@ -50,136 +30,48 @@ jobs:
           TEST_DATABASE_URL=postgresql://${{ secrets.DB_USER }}:${{ secrets.DB_PASSWORD }}@postgres:5432/testdb
           PORT=5000
           "@ | Out-File -FilePath .env -Encoding UTF8
-          
-          Write-Host ".env file created successfully" -ForegroundColor Green
       
-      - name: Build Docker images
+      - name: Stop existing containers
+        shell: powershell
+        run: docker-compose down
+        continue-on-error: true
+      
+      - name: Build and deploy
         shell: powershell
         run: |
-          Write-Host "Building Docker images..." -ForegroundColor Yellow
-          docker-compose build --no-cache
-          Write-Host "Docker images built successfully" -ForegroundColor Green
-      
-      - name: Start services
-        shell: powershell
-        run: |
-          Write-Host "Starting services..." -ForegroundColor Yellow
-          docker-compose up -d
-          Write-Host "Services started, waiting 45 seconds for initialization..." -ForegroundColor Yellow
+          docker-compose up -d --build
+          Write-Host "Waiting for services to start..."
           Start-Sleep -Seconds 45
       
-      - name: Check container status
+      - name: Verify deployment
         shell: powershell
         run: |
-          Write-Host "=== Container Status ===" -ForegroundColor Cyan
+          Write-Host "Checking containers..."
           docker-compose ps
-          Write-Host ""
-          Write-Host "=== Container Logs ===" -ForegroundColor Cyan
-          docker-compose logs --tail=50
-      
-      - name: Test health endpoints
-        shell: powershell
-        run: |
-          Write-Host "Testing API health..." -ForegroundColor Yellow
           
-          # Wait for Flask to be ready
-          $maxAttempts = 30
+          Write-Host "`nTesting health endpoint..."
+          $maxAttempts = 20
           $attempt = 0
-          $success = $false
           
           while ($attempt -lt $maxAttempts) {
             try {
-              $response = Invoke-WebRequest -Uri "http://localhost:5000/health" -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
-              Write-Host "Flask API is ready!" -ForegroundColor Green
-              $success = $true
+              Invoke-WebRequest -Uri "http://localhost:5000/health" -UseBasicParsing -ErrorAction Stop | Out-Null
+              Write-Host "✓ Application is running!" -ForegroundColor Green
               break
             } catch {
               $attempt++
-              Write-Host "Attempt $attempt/$maxAttempts - Waiting for Flask..." -ForegroundColor Yellow
-              Start-Sleep -Seconds 2
+              if ($attempt -eq $maxAttempts) {
+                Write-Host "✗ Health check failed" -ForegroundColor Red
+                docker-compose logs
+                exit 1
+              }
+              Start-Sleep -Seconds 3
             }
           }
           
-          if (-not $success) {
-            Write-Host "ERROR: Flask API failed to start" -ForegroundColor Red
-            docker-compose logs flask-app
-            exit 1
-          }
-      
-      - name: Test all endpoints
-        shell: powershell
-        run: |
-          Write-Host "Testing all endpoints..." -ForegroundColor Yellow
-          
-          # Test health
-          try {
-            $response = Invoke-WebRequest -Uri "http://localhost:5000/health" -UseBasicParsing
-            Write-Host "✓ Health endpoint OK" -ForegroundColor Green
-          } catch {
-            Write-Host "✗ Health endpoint FAILED" -ForegroundColor Red
-            throw
-          }
-          
-          # Test database
-          try {
-            $response = Invoke-WebRequest -Uri "http://localhost:5000/db-check" -UseBasicParsing
-            Write-Host "✓ Database endpoint OK" -ForegroundColor Green
-          } catch {
-            Write-Host "✗ Database endpoint FAILED" -ForegroundColor Red
-            docker-compose logs postgres
-            throw
-          }
-          
-          # Test users API
-          try {
-            $response = Invoke-WebRequest -Uri "http://localhost:5000/api/users" -UseBasicParsing
-            Write-Host "✓ Users API OK" -ForegroundColor Green
-          } catch {
-            Write-Host "✗ Users API FAILED" -ForegroundColor Red
-            throw
-          }
-          
-          # Test products API
-          try {
-            $response = Invoke-WebRequest -Uri "http://localhost:5000/api/products" -UseBasicParsing
-            Write-Host "✓ Products API OK" -ForegroundColor Green
-          } catch {
-            Write-Host "✗ Products API FAILED" -ForegroundColor Red
-            throw
-          }
-          
-          # Test frontend
-          try {
-            $response = Invoke-WebRequest -Uri "http://localhost" -UseBasicParsing
-            Write-Host "✓ Frontend OK" -ForegroundColor Green
-          } catch {
-            Write-Host "✗ Frontend FAILED" -ForegroundColor Red
-            docker-compose logs frontend
-            throw
-          }
-      
-      - name: Display success message
-        shell: powershell
-        run: |
-          Write-Host ""
+          Write-Host "`n========================================" -ForegroundColor Green
+          Write-Host "DEPLOYMENT SUCCESSFUL!" -ForegroundColor Green
           Write-Host "========================================" -ForegroundColor Green
-          Write-Host "   DEPLOYMENT SUCCESSFUL!" -ForegroundColor Green
-          Write-Host "========================================" -ForegroundColor Green
-          Write-Host ""
-          Write-Host "Application URLs:" -ForegroundColor Cyan
-          Write-Host "  Frontend:  http://localhost" -ForegroundColor Yellow
-          Write-Host "  Backend:   http://localhost:5000" -ForegroundColor Yellow
-          Write-Host "  Health:    http://localhost:5000/health" -ForegroundColor Yellow
-          Write-Host "  DB Check:  http://localhost:5000/db-check" -ForegroundColor Yellow
-          Write-Host ""
-          Write-Host "Container Status:" -ForegroundColor Cyan
-          docker-compose ps
-      
-      - name: Cleanup on failure
-        if: failure()
-        shell: powershell
-        run: |
-          Write-Host "Deployment failed, showing logs..." -ForegroundColor Red
-          docker-compose logs
-          Write-Host "Stopping containers..." -ForegroundColor Yellow
-          docker-compose down -v
+          Write-Host "`nAccess your application at:"
+          Write-Host "  Frontend: http://localhost" -ForegroundColor Cyan
+          Write-Host "  Backend:  http://localhost:5000" -ForegroundColor Cyan
