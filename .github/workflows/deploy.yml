@@ -5,6 +5,10 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   deploy:
     name: Build and Deploy
@@ -15,8 +19,9 @@ jobs:
         uses: actions/checkout@v4
       
       - name: Create .env file
+        shell: bash
         run: |
-          cat > .env << EOF
+          cat > .env << 'EOF'
           FLASK_APP=run.py
           FLASK_ENV=production
           SECRET_KEY=${{ secrets.SECRET_KEY }}
@@ -31,15 +36,18 @@ jobs:
           EOF
       
       - name: Stop existing containers
+        shell: bash
         run: docker-compose down || true
       
       - name: Build and deploy
+        shell: bash
         run: |
           docker-compose up -d --build
           echo "Waiting for services to start..."
           sleep 45
       
       - name: Verify deployment
+        shell: bash
         run: |
           echo "Checking containers..."
           docker-compose ps
@@ -48,7 +56,7 @@ jobs:
           echo "Testing health endpoint..."
           for i in {1..20}; do
             if curl -f http://localhost:5000/health > /dev/null 2>&1; then
-              echo "✓ Application is running!"
+              echo "Application is running!"
               echo ""
               echo "========================================"
               echo "DEPLOYMENT SUCCESSFUL!"
@@ -63,6 +71,6 @@ jobs:
             sleep 3
           done
           
-          echo "✗ Health check failed"
+          echo "Health check failed"
           docker-compose logs
           exit 1
